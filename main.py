@@ -11,7 +11,7 @@ from stats_utils import (
 )
 
 video_path = "path_to_ego4d_video.mp4"
-model = YOLO("yolov8n.pt")  # or chosen weights
+model = YOLO("yolov8n.pt")  # or chosen model version
 
 cap = cv2.VideoCapture(video_path)
 fps = cap.get(cv2.CAP_PROP_FPS)
