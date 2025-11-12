@@ -1,0 +1,8 @@
+numpy
+opencv-python
+pandas
+pyyaml
+filterpy
+scipy
+# comment out ultralytics, replace with yolov10
+git+https://github.com/THU-MIG/yolov10.git

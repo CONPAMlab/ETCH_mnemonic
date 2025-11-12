@@ -1,112 +1,100 @@
-from ultralytics import YOLO
-from tqdm import tqdm
-import numpy as np
-import pandas as pd
-import cv2
 import os
-
-from stats_utils import (
-    to_gray, spatial_autocorr, spatial_autocorr_channels,
-    temporal_autocorr, compute_optical_flow, flow_magnitude,
-    motion_autocorr_from_flows, frame_entropy
-)
+import cv2
+import torch
+import pandas as pd
+from tqdm import tqdm
 
 # -----------------------------
-# CONFIG
+# 1. Load YOLOv10
 # -----------------------------
-video_files = [
-    "41092024.MOV",
-    "45112025.MOV",
-    "69812023.MOV"
-]
+from yolov10.models.common import DetectMultiBackend  # model loader
+from yolov10.utils.torch_utils import select_device
+from yolov10.utils.general import non_max_suppression, scale_boxes
+from yolov10.utils.augmentations import letterbox
 
-model = YOLO("yolov8n.pt")  # lightweight YOLOv8 model
+# Paths
+VIDEOS_DIR = "videos"
+OUTPUTS_DIR = "outputs"
+os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-for video_path in video_files:
-    print(f"\n Analyzing video: {video_path}")
+# Model setup
+device = select_device('')
+weights = 'yolov10n.pt'  # small model; change to yolov10s.pt or yolov10x.pt if desired
+model = DetectMultiBackend(weights, device=device)
+stride, names = model.stride, model.names
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f" Cannot open {video_path}")
+# -----------------------------
+# 2. Process all videos
+# -----------------------------
+summary = []
+
+for file in os.listdir(VIDEOS_DIR):
+    if not file.endswith(".mp4"):
         continue
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    sample_rate = max(1, int(fps // 5))  # sample roughly 5 fps
+    video_path = os.path.join(VIDEOS_DIR, file)
+    cap = cv2.VideoCapture(video_path)
 
-    prev_gray = None
-    prev_flow = None
-    stats = []
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    out_path = os.path.join(OUTPUTS_DIR, f"{os.path.splitext(file)[0]}_annotated.mp4")
+
+    out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+
     frame_idx = 0
+    pbar = tqdm(total=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), desc=f"Processing {file}")
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        if frame_idx % sample_rate != 0:
-            frame_idx += 1
-            continue
+        # Preprocess
+        img = letterbox(frame, 640, stride=stride, auto=True)[0]
+        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR -> RGB, to 3xHxW
+        img = torch.from_numpy(img).to(device).float() / 255.0
+        if img.ndimension() == 3:
+            img = img.unsqueeze(0)
 
-        frame_bgr = frame
-        frame_gray = to_gray(frame_bgr)
+        # Inference
+        pred = model(img)
+        pred = non_max_suppression(pred, conf_thres=0.25, iou_thres=0.45)[0]
 
-        # spatial features
-        spatial_center = spatial_autocorr(frame_gray)
-        spatial_rgb = spatial_autocorr_channels(frame_bgr, color_space="RGB")
+        if len(pred):
+            pred[:, :4] = scale_boxes(img.shape[2:], pred[:, :4], frame.shape).round()
+            n_objects = len(pred)
+            mean_area = ((pred[:, 2] - pred[:, 0]) * (pred[:, 3] - pred[:, 1])).mean().item()
+            mean_conf = pred[:, 4].mean().item()
 
-        # temporal autocorr
-        t_auto = temporal_autocorr(prev_gray, frame_gray)
-
-        motion_corr = float("nan")
-        mag_mean = float("nan")
-        if prev_gray is not None:
-            flow = compute_optical_flow(prev_gray, frame_gray)
-            mag = flow_magnitude(flow)
-            mag_mean = float(np.mean(mag))
-            motion_corr = motion_autocorr_from_flows(prev_flow, flow) if prev_flow is not None else float("nan")
-            prev_flow = flow
+            # Draw boxes
+            for *xyxy, conf, cls in pred:
+                label = f"{names[int(cls)]} {conf:.2f}"
+                cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 255, 0), 2)
+                cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         else:
-            prev_flow = None
+            n_objects, mean_area, mean_conf = 0, 0.0, 0.0
 
-        # entropy
-        ent = frame_entropy(frame_gray)
-
-        # YOLO detection
-        results = model(frame_bgr, verbose=False)[0]
-        objs = results.boxes
-        if objs is None or len(objs) == 0:
-            count, mean_area, mean_conf = 0, 0.0, 0.0
-        else:
-            areas = (objs.xyxy[:, 2] - objs.xyxy[:, 0]) * (objs.xyxy[:, 3] - objs.xyxy[:, 1])
-            count = int(len(objs))
-            mean_area = float(np.mean(areas.cpu().numpy()))
-            mean_conf = float(objs.conf.mean().item())
-
-        stats.append({
-            "frame_idx": frame_idx,
-            "spatial_center": spatial_center,
-            "spatial_R": spatial_rgb[0],
-            "spatial_G": spatial_rgb[1],
-            "spatial_B": spatial_rgb[2],
-            "temporal_auto": t_auto,
-            "motion_corr": motion_corr,
-            "motion_mag_mean": mag_mean,
-            "entropy": ent,
-            "obj_count": count,
-            "mean_area": mean_area,
-            "mean_conf": mean_conf
+        # Write frame
+        out.write(frame)
+        summary.append({
+            'video': file,
+            'frame': frame_idx,
+            'n_objects': n_objects,
+            'mean_area': mean_area,
+            'mean_confidence': mean_conf
         })
 
-        prev_gray = frame_gray
         frame_idx += 1
+        pbar.update(1)
 
     cap.release()
+    out.release()
+    pbar.close()
 
-    # Save per-video CSV
-    df = pd.DataFrame(stats)
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    csv_name = f"{base_name}_stats.csv"
-    df.to_csv(csv_name, index=False)
-    print(f"✅ Saved {csv_name} ({len(df)} sampled frames)")
-    print(df.describe())
+# -----------------------------
+# 3. Save summary stats
+# -----------------------------
+df = pd.DataFrame(summary)
+df.to_csv(os.path.join(OUTPUTS_DIR, "detections_summary.csv"), index=False)
+print(f"\n Done! Results saved to {OUTPUTS_DIR}")

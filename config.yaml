@@ -1,0 +1,23 @@
+model:
+  weights: "weights/yolov10n.pt"   # choose yolov10n/s/m/l/x.pt depending on your GPU
+  device: "0"
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+
+input:
+  videos_dir: "videos"
+  output_dir: "outputs"
+  crop_objects: true      # save cropped object images per track
+  crop_size_limit: 1024   # max dimension for crops
+
+tracker:
+  max_age: 30             # frames to keep lost track
+  min_hits: 3             # min frames before confirming track
+  iou_threshold: 0.3      # association IOU threshold
+
+save:
+  detections_csv: true
+  tracks_csv: true
+  tracks_json: true
+
+
