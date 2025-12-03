@@ -1,29 +1,48 @@
 import os
 import sys
 import cv2
+import numpy as np
 import torch
 import pandas as pd
 from tqdm import tqdm
-import numpy as np
+import urllib.request
 
-# -------------------------------------------------
-# 0. Make sure we are using the THU-MIG yolov10 repo
-# -------------------------------------------------
+# -----------------------------
+#  Add project root to sys.path
+# -----------------------------
 repo_dir = os.path.dirname(os.path.abspath(__file__))
-yolo_dir = os.path.join(repo_dir, "yolov10")
-if yolo_dir not in sys.path:
-    sys.path.insert(0, yolo_dir)
-
-from sort import Sort
-from ultralytics import YOLO  # this is the ultralytics package inside yolov10/
+if repo_dir not in sys.path:
+    sys.path.insert(0, repo_dir)
 
 # -----------------------------
-# 1. Config
+#  External libraries
 # -----------------------------
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+
+
+# -----------------------------
+# 1. Configuration + weights helper
+# -----------------------------
+def ensure_weights(path, url):
+    """Download weight file automatically if missing."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not os.path.exists(path):
+        print(f"Downloading {path} ...")
+        urllib.request.urlretrieve(url, path)
+        print(f"Download complete: {path}")
+
+
+# Example: YOLO11m (more accurate than nano)
+ensure_weights(
+    "weights/yolo11m.pt",
+    "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m.pt"
+)
+
 CONFIG = {
     "model": {
-        "weights": "weights/yolov10n.pt",
-        "device": "cpu",            # "cpu" only for your M3 setup
+        "weights": "weights/yolo11m.pt",
+        "device": "cpu",          # "cpu", "mps", or "cuda"
         "conf_threshold": 0.25,
         "iou_threshold": 0.45,
     },
@@ -36,82 +55,90 @@ CONFIG = {
     "tracker": {
         "max_age": 30,
         "min_hits": 3,
-        "iou_threshold": 0.3,
+        "max_iou_distance": 0.7,
     },
-    "save": {
-        "detections_csv": True,
-        "tracks_csv": True,
-        "tracks_json": True,
+    "viz": {
+        "box_alpha": 0.25,        # transparency for filled boxes
+        "trail_len": 30,          # how many past centers to keep per track
     },
 }
 
 # -----------------------------
-# 2. Prepare folders and device
+# 2. Prepare folders
 # -----------------------------
-device = CONFIG["model"]["device"]
 VIDEOS_DIR = CONFIG["input"]["videos_dir"]
 OUTPUTS_DIR = CONFIG["input"]["output_dir"]
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
+
 CROP_DIR = os.path.join(OUTPUTS_DIR, "crops")
 os.makedirs(CROP_DIR, exist_ok=True)
 
 # -----------------------------
-# 3. Ensure model weights exist
+# 3. Load Ultralytics YOLO model
 # -----------------------------
-weights = CONFIG["model"]["weights"]
-os.makedirs(os.path.dirname(weights), exist_ok=True)
-if not os.path.exists(weights):
-    import urllib.request
-
-    print(f"Downloading {weights} ...")
-    url = "https://github.com/THU-MIG/yolov10/releases/download/v1.0/yolov10n.pt"
-    urllib.request.urlretrieve(url, weights)
-    print("Download complete.")
+print("Loading YOLOv11 model...")
+model = YOLO(CONFIG["model"]["weights"])
+CLASS_NAMES = model.names  # dict: class_id -> name
+print("Model loaded.")
 
 # -----------------------------
-# 4. Load YOLOv10 model (THU-MIG)
+# 4. Color helper – per TRACK ID
 # -----------------------------
-print("Loading YOLOv10 model...")
-model = YOLO(weights)          # this uses the THU-MIG ultralytics fork
-model.to(device)
+def get_color(track_id):
+    """
+    Deterministic color per track ID.
+    This makes each track have a persistent color over time.
+    """
+    track_id = int(track_id)
+    np.random.seed(track_id * 12345)
+    return tuple(int(c) for c in np.random.randint(0, 255, size=3))
+
 
 # -----------------------------
-# 5. Initialize SORT tracker
+# 5. Initialize DeepSORT tracker
 # -----------------------------
-tracker = Sort(
+tracker = DeepSort(
     max_age=CONFIG["tracker"]["max_age"],
-    min_hits=CONFIG["tracker"]["min_hits"],
-    iou_threshold=CONFIG["tracker"]["iou_threshold"],
+    n_init=CONFIG["tracker"]["min_hits"],
+    max_iou_distance=CONFIG["tracker"]["max_iou_distance"],
+    embedder="mobilenet",
+    half=True,
+    bgr=True,
 )
 
+
 # -----------------------------
-# 6. Process videos
+# 6. Process Videos
 # -----------------------------
-summary_rows = []
+summary = []
 
 for file in os.listdir(VIDEOS_DIR):
     if not file.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
         continue
 
     video_path = os.path.join(VIDEOS_DIR, file)
-    print(f"\nProcessing video: {video_path}")
+    print(f"\nProcessing video: {file}")
 
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"⚠️ Could not open video: {video_path}")
-        continue
-
-    fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
     out_path = os.path.join(OUTPUTS_DIR, f"{os.path.splitext(file)[0]}_annotated.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+    out = cv2.VideoWriter(
+        out_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
 
-    pbar = tqdm(total=frame_count, desc=f"Processing {file}")
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    pbar = tqdm(total=total_frames)
+
     frame_idx = 0
+
+    # store track center history per video
+    track_traces = {}  # track_id -> list of (cx, cy)
 
     while True:
         ret, frame = cap.read()
@@ -119,98 +146,134 @@ for file in os.listdir(VIDEOS_DIR):
             break
 
         # -----------------------------
-        # YOLOv10 inference via YOLO wrapper
+        #   YOLOv11 prediction
         # -----------------------------
-        # model(...) returns a list of Results objects
-        results_list = model(
+        results = model.predict(
             frame,
             conf=CONFIG["model"]["conf_threshold"],
             iou=CONFIG["model"]["iou_threshold"],
+            device=CONFIG["model"]["device"],
             verbose=False,
         )
-        results = results_list[0]
 
-        dets = []
-        if results.boxes is not None and len(results.boxes) > 0:
-            # results.boxes.xyxy: (N,4), results.boxes.conf: (N,)
-            xyxy = results.boxes.xyxy.cpu().numpy()
-            confs = results.boxes.conf.cpu().numpy()
+        r = results[0]
+        raw_dets = []   # list of [ [x1,y1,x2,y2], conf, class_id ]
 
-            for (x1, y1, x2, y2), conf in zip(xyxy, confs):
-                dets.append([float(x1), float(y1), float(x2), float(y2), float(conf)])
-
-        dets = np.array(dets, dtype=float) if dets else np.empty((0, 5), dtype=float)
+        if len(r.boxes) > 0:
+            for box in r.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                conf = float(box.conf[0].item()) if box.conf.ndim > 0 else float(box.conf)
+                cls = int(box.cls[0].item()) if box.cls.ndim > 0 else int(box.cls)
+                raw_dets.append([[x1, y1, x2, y2], conf, cls])
 
         # -----------------------------
-        # Update SORT tracker
+        #   Update DeepSORT tracker
         # -----------------------------
-        tracks = tracker.update(dets)
+        tracks = tracker.update_tracks(raw_dets, frame=frame)
 
-        n_objects = len(tracks)
-        mean_area = (
-            float(
-                np.mean((tracks[:, 2] - tracks[:, 0]) * (tracks[:, 3] - tracks[:, 1]))
+        # -----------------------------
+        #   Visualization
+        #   - Semi-transparent filled boxes
+        #   - Colored by track ID
+        #   - Label: class name + track ID
+        #   - Motion trails
+        # -----------------------------
+        overlay = frame.copy()
+
+        areas = []
+        confs = []
+
+        for track in tracks:
+            if not track.is_confirmed():
+                continue
+
+            track_id = int(track.track_id)
+            l, t, r_, b_ = track.to_ltrb()
+            l, t, r_, b_ = map(int, [l, t, r_, b_])
+
+            cls = track.det_class
+            if cls is None:
+                continue
+            cls = int(cls)
+
+            color = get_color(track_id)
+            label = f"{CLASS_NAMES.get(cls, str(cls))} | ID {track_id}"
+
+            # stats
+            areas.append((r_ - l) * (b_ - t))
+            if track.det_conf is not None:
+                confs.append(float(track.det_conf))
+
+            # ---- filled rectangle on overlay ----
+            cv2.rectangle(overlay, (l, t), (r_, b_), color, thickness=-1)
+
+            # ---- border on main frame ----
+            cv2.rectangle(frame, (l, t), (r_, b_), color, thickness=2)
+
+            # ---- label background + text ----
+            (tw, th), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
             )
-            if n_objects
-            else 0.0
-        )
-        mean_conf = float(np.mean(dets[:, 4])) if len(dets) else 0.0
+            text_bg_tl = (l, max(0, t - th - baseline - 4))
+            text_bg_br = (l + tw + 4, t)
 
-        # -----------------------------
-        # Draw boxes & save crops
-        # -----------------------------
-        for trk in tracks:
-            x1, y1, x2, y2, track_id = trk
-            track_id = int(track_id)
-
-            # Draw bounding box
-            cv2.rectangle(
-                frame,
-                (int(x1), int(y1)),
-                (int(x2), int(y2)),
-                (0, 255, 0),
-                2,
-            )
-            label = f"ID {track_id}"
+            cv2.rectangle(frame, text_bg_tl, text_bg_br, color, thickness=-1)
             cv2.putText(
                 frame,
                 label,
-                (int(x1), int(y1) - 10),
+                (text_bg_tl[0] + 2, t - 4),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.6,
                 (255, 255, 255),
-                1,
+                2,
             )
 
-            # Save crop if enabled
+            # ---- save crop (from original frame) ----
             if CONFIG["input"]["crop_objects"]:
-                x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
-                x1i = max(0, min(x1i, width - 1))
-                x2i = max(0, min(x2i, width - 1))
-                y1i = max(0, min(y1i, height - 1))
-                y2i = max(0, min(y2i, height - 1))
-
-                if x2i > x1i and y2i > y1i:
-                    crop = frame[y1i:y2i, x1i:x2i]
-                    h, w = crop.shape[:2]
-                    if max(h, w) > CONFIG["input"]["crop_size_limit"]:
-                        scale = CONFIG["input"]["crop_size_limit"] / max(h, w)
-                        crop = cv2.resize(
-                            crop,
-                            (int(w * scale), int(h * scale)),
-                            interpolation=cv2.INTER_AREA,
-                        )
+                x1c = max(0, l)
+                y1c = max(0, t)
+                x2c = min(width, r_)
+                y2c = min(height, b_)
+                crop = frame[y1c:y2c, x1c:x2c]
+                if crop.size > 0:
                     crop_path = os.path.join(
-                        CROP_DIR,
-                        f"{os.path.splitext(file)[0]}_id{track_id}_frame{frame_idx:06d}.jpg",
+                        CROP_DIR, f"{os.path.splitext(file)[0]}_ID{track_id}_F{frame_idx}.jpg"
                     )
                     cv2.imwrite(crop_path, crop)
 
-        # Write frame to output video
+            # ---- update center traces for motion lines ----
+            cx = int((l + r_) / 2)
+            cy = int((t + b_) / 2)
+            if track_id not in track_traces:
+                track_traces[track_id] = []
+            track_traces[track_id].append((cx, cy))
+
+            # limit history length
+            if len(track_traces[track_id]) > CONFIG["viz"]["trail_len"]:
+                track_traces[track_id] = track_traces[track_id][-CONFIG["viz"]["trail_len"]:]
+
+        # ---- apply transparency for filled boxes ----
+        alpha = CONFIG["viz"]["box_alpha"]
+        frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+
+        # ---- draw motion trails ----
+        for tid, pts in track_traces.items():
+            if len(pts) < 2:
+                continue
+            color = get_color(tid)
+            for i in range(1, len(pts)):
+                cv2.line(frame, pts[i - 1], pts[i], color, thickness=2)
+
+        # -----------------------------
+        #   Frame-level summary stats
+        # -----------------------------
+        n_objects = len(areas)
+        mean_area = float(np.mean(areas)) if areas else 0.0
+        mean_conf = float(np.mean(confs)) if confs else 0.0
+
         out.write(frame)
 
-        # Save per-frame summary
-        summary_rows.append(
+        summary.append(
             {
                 "video": file,
                 "frame": frame_idx,
@@ -223,13 +286,14 @@ for file in os.listdir(VIDEOS_DIR):
         frame_idx += 1
         pbar.update(1)
 
+    pbar.close()
     cap.release()
     out.release()
-    pbar.close()
 
 # -----------------------------
-# 7. Save summary stats
+# 7. Save Summary
 # -----------------------------
-df = pd.DataFrame(summary_rows)
+df = pd.DataFrame(summary)
 df.to_csv(os.path.join(OUTPUTS_DIR, "detections_summary.csv"), index=False)
-print(f"\n Done! Results saved to: {OUTPUTS_DIR}")
+
+print("\nDone! All results saved.")

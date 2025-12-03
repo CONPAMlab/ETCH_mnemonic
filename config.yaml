@@ -1,5 +1,5 @@
 model:
-  weights: "weights/yolov10n.pt"   # choose yolov10n/s/m/l/x.pt depending on your GPU
+  weights: "weights/yolov10m.pt"   # choose yolov10n/s/m/l/x.pt depending on your GPU
   device: cpu
   conf_threshold: 0.25
   iou_threshold: 0.45

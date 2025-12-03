@@ -1,8 +1,7 @@
-numpy
+ultralytics==8.3.39
 opencv-python
+numpy<2
 pandas
-pyyaml
+tqdm
+matplotlib
 filterpy
-scipy
-# comment out ultralytics, replace with yolov10
-git+https://github.com/THU-MIG/yolov10.git
