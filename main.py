@@ -258,6 +258,14 @@ def process_one_video(video_path: str):
         sal_map = sal_map.astype(np.float32)
         sal_map_norm = (sal_map - sal_map.min()) / (sal_map.max() - sal_map.min() + 1e-8)
 
+        if not np.isfinite(sal_map_norm).all():
+            # allow NaNs but make it explicit
+            pass
+        else:
+            mn, mx = float(sal_map_norm.min()), float(sal_map_norm.max())
+            if mn < -1e-6 or mx > 1.0 + 1e-6:
+                raise ValueError(f"Saliency map out of [0,1]: min={mn}, max={mx}, frame={frame_idx}, video={file}")
+
         # -------- optical flow (between frames) --------
         flow_mag = None
         flow_ang = None
@@ -330,7 +338,11 @@ def process_one_video(video_path: str):
             orient = compute_orientation_deg(gray, l, t, r_, b_)
 
             # ---- saliency score from saliency map inside box ----
-            sal_box_mean = mean_in_box(sal_map_norm, l, t, r_, b_)
+            sal_box_mean = float(np.nanmean(sal_map_norm[t:b_, l:r_])) if (b_ > t and r_ > l) else np.nan
+
+            if np.isfinite(sal_box_mean) and sal_box_mean < -1e-6:
+                raise ValueError(
+                    f"Negative saliency_score={sal_box_mean} at frame={frame_idx}, track={tid}, video={file}")
 
             # ---- kinematics from center displacement ----
             vx = vy = speed = direction = accel = np.nan
