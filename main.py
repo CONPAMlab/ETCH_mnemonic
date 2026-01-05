@@ -123,6 +123,48 @@ def compute_color_stats(frame_bgr, l, t, r, b):
     return dict(mean_r=float(mean_r), mean_g=float(mean_g), mean_b=float(mean_b),
                 mean_h=float(mean_h), mean_s=float(mean_s), mean_v=float(mean_v))
 
+def compute_lab_stats(frame_bgr, l, t, r, b):
+    """
+    Compute Lab stats inside the bounding box.
+
+    OpenCV Lab (8-bit) conventions:
+      - L in [0,255]  (roughly maps to L* in [0,100])
+      - a in [0,255] with 128 ~ 0
+      - b in [0,255] with 128 ~ 0
+
+    We output:
+      mean_L, mean_a, mean_b (raw OpenCV Lab means)
+      mean_a_c, mean_b_c (centered: minus 128)
+      std_L, std_a, std_b
+    """
+    crop = frame_bgr[t:b, l:r]
+    if crop.size == 0:
+        return dict(
+            mean_L=np.nan, mean_a=np.nan, mean_b=np.nan,
+            mean_a_c=np.nan, mean_b_c=np.nan,
+            std_L=np.nan, std_a=np.nan, std_b=np.nan
+        )
+
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+    L = lab[:, :, 0].astype(np.float32)
+    a = lab[:, :, 1].astype(np.float32)
+    bb = lab[:, :, 2].astype(np.float32)
+
+    mean_L = float(np.mean(L))
+    mean_a = float(np.mean(a))
+    mean_b = float(np.mean(bb))
+
+    return dict(
+        mean_L=mean_L,
+        mean_a=mean_a,
+        mean_b=mean_b,
+        mean_a_c=float(mean_a - 128.0),
+        mean_b_c=float(mean_b - 128.0),
+        std_L=float(np.std(L)),
+        std_a=float(np.std(a)),
+        std_b=float(np.std(bb)),
+    )
+
 
 def compute_contrast(frame_gray, l, t, r, b):
     patch = frame_gray[t:b, l:r]
@@ -239,6 +281,7 @@ def process_one_video(video_path: str):
         "x1","y1","x2","y2","box_w","box_h","area_px","area_rel",
         "cx","cy","cx_norm","cy_norm","dist_center_norm",
         "mean_r","mean_g","mean_b","mean_h","mean_s","mean_v",
+        "mean_L","mean_a","mean_b_lab","mean_a_c","mean_b_c","std_L","std_a","std_b_lab",
         "contrast_gray_std","orientation_deg",
         "vx_px_s","vy_px_s","speed_px_s","dir_deg","accel_px_s2",
         "z_area_rel","z_speed","z_dist_center","z_contrast",
@@ -334,6 +377,7 @@ def process_one_video(video_path: str):
 
             # appearance
             color_stats = compute_color_stats(frame, l, t, r_, b_)
+            lab_stats = compute_lab_stats(frame, l, t, r_, b_)
             contrast = compute_contrast(gray, l, t, r_, b_)
             orient = compute_orientation_deg(gray, l, t, r_, b_)
 
@@ -408,6 +452,15 @@ def process_one_video(video_path: str):
                 "mean_h": color_stats["mean_h"],
                 "mean_s": color_stats["mean_s"],
                 "mean_v": color_stats["mean_v"],
+                "mean_L": lab_stats["mean_L"],
+                "mean_a": lab_stats["mean_a"],
+                "mean_b_lab": lab_stats["mean_b"],  # name avoids collision with mean_b (blue)
+                "mean_a_c": lab_stats["mean_a_c"],
+                "mean_b_c": lab_stats["mean_b_c"],
+                "std_L": lab_stats["std_L"],
+                "std_a": lab_stats["std_a"],
+                "std_b_lab": lab_stats["std_b"],  # name avoids collision with std_b if ever added
+
 
                 "contrast_gray_std": contrast,
                 "orientation_deg": orient,
@@ -439,7 +492,7 @@ def process_one_video(video_path: str):
 
             # feature-change rates (per second)
             d_area_rel = d_orient = np.nan
-            d_rgb = d_hsv = np.nan
+            d_rgb = d_hsv = d_lab = np.nan
             if tid in prev_state and fps > 0:
                 prev = prev_state[tid]
                 dt_frames = frame_idx - prev["frame_idx"]
@@ -458,6 +511,17 @@ def process_one_video(video_path: str):
                         d_rgb = float(np.sqrt((color_stats["mean_r"]-pr)**2 + (color_stats["mean_g"]-pg)**2 + (color_stats["mean_b"]-pb)**2) / max(dt, 1e-8))
                     if np.isfinite(ph) and np.isfinite(color_stats["mean_h"]):
                         d_hsv = float(np.sqrt((color_stats["mean_h"]-ph)**2 + (color_stats["mean_s"]-ps)**2 + (color_stats["mean_v"]-pv)**2) / max(dt, 1e-8))
+
+                    pL = prev.get("mean_L", np.nan)
+                    pa = prev.get("mean_a", np.nan)
+                    pbl = prev.get("mean_b_lab", np.nan)
+
+                    if np.isfinite(pL) and np.isfinite(lab_stats["mean_L"]):
+                        d_lab = float(np.sqrt(
+                            (lab_stats["mean_L"] - pL) ** 2 +
+                            (lab_stats["mean_a"] - pa) ** 2 +
+                            (lab_stats["mean_b"] - pbl) ** 2
+                        ) / max(dt, 1e-8))
 
             # disappear/reappear events (gap-based)
             # if we saw the track before but this frame is "occluded", note it; if occluded streak ends, note reappear
@@ -483,6 +547,7 @@ def process_one_video(video_path: str):
                 "d_orientation_deg_per_s": d_orient,
                 "d_rgb_L2_per_s": d_rgb,
                 "d_hsv_L2_per_s": d_hsv,
+                "d_lab_L2_per_s": d_lab,
 
                 "traj_pred_err_px": pred_err,
             })
@@ -521,6 +586,9 @@ def process_one_video(video_path: str):
                 area_rel=area_rel,
                 mean_r=color_stats["mean_r"], mean_g=color_stats["mean_g"], mean_b=color_stats["mean_b"],
                 mean_h=color_stats["mean_h"], mean_s=color_stats["mean_s"], mean_v=color_stats["mean_v"],
+                mean_L=lab_stats["mean_L"],
+                mean_a=lab_stats["mean_a"],
+                mean_b_lab=lab_stats["mean_b"],
                 orientation_deg=orient,
                 occluded=occluded
             )
