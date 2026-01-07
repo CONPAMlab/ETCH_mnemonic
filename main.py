@@ -44,7 +44,8 @@ CONFIG = {
         "iou_threshold": 0.45,
     },
     "input": {
-        "videos_dir": "videos",
+        ## "videos_dir": "videos",
+        "videos_dir": "/Volumes/HD_cv/ego4d_full_data/v2",  # <-- set to the Ego4D root (or the videos folder)
         "output_dir": "outputs",
         "save_annotated_video": True,
         "crop_objects": True,
@@ -667,27 +668,51 @@ def process_one_video(video_path: str):
 
     print(f"Done: {file}")
 
+def find_videos_recursive(root_dir, exts=(".mp4", ".mov", ".avi", ".mkv")):
+    videos = []
+    for dirpath, _, filenames in os.walk(root_dir):
+        for fn in filenames:
+            fn_low = fn.lower()
+
+            # skip macOS junk / metadata files
+            if fn.startswith("._") or fn == ".DS_Store":
+                continue
+
+            if fn_low.endswith(exts):
+                videos.append(os.path.join(dirpath, fn))
+
+    videos.sort()
+    return videos
 
 def main():
-    videos = []
-    for f in os.listdir(VIDEOS_DIR):
-        if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
-            videos.append(os.path.join(VIDEOS_DIR, f))
-    videos.sort()
+    videos_root = CONFIG["input"]["videos_dir"]
 
+    # Scan ONCE
+    all_videos = find_videos_recursive(videos_root, exts=(".mp4",))
+    if not all_videos:
+        raise RuntimeError(f"No .mp4 videos found under: {videos_root}")
+
+    # Pick 3 for testing
+    videos = all_videos[:min(3, len(all_videos))]
+
+    # Print info
+    print(f"Found {len(all_videos)} total .mp4 videos under: {videos_root}")
+    print(f"Running {len(videos)} test videos:")
+    for v in videos:
+        print("  -", v)
+
+    # Run
     nw = int(CONFIG["scale"]["num_workers"])
     if nw <= 1:
         for vp in videos:
             process_one_video(vp)
     else:
-        # Multiprocess across videos (each process loads its own YOLO + DeepSORT + saliency)
         with ProcessPoolExecutor(max_workers=nw) as ex:
             futs = [ex.submit(process_one_video, vp) for vp in videos]
             for fut in as_completed(futs):
-                # surface exceptions early
                 fut.result()
 
-    print("\nAll videos processed.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
