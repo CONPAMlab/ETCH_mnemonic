@@ -179,6 +179,32 @@ def compute_lab_stats(frame_bgr, l, t, r, b):
     )
 
 
+def compute_rgb_3d_spread(frame_bgr, l, t, r, b):
+    """
+    Spatial variability of RGB within the bounding box, treating each pixel as a 3D vector (R,G,B).
+
+    Returns:
+      rgb_spread_rms: sqrt(E[||x - mu||^2])  (3D "std" magnitude; sqrt(trace(cov)))
+      rgb_spread_mean: E[||x - mu||]        (mean Euclidean deviation; more robust-ish)
+    """
+    crop = frame_bgr[t:b, l:r]
+    if crop.size == 0:
+        return np.nan, np.nan
+
+    # Convert BGR -> RGB and flatten to N x 3
+    rgb = crop[:, :, ::-1].astype(np.float32)
+    X = rgb.reshape(-1, 3)
+
+    mu = X.mean(axis=0, dtype=np.float32)
+    d = X - mu
+    sq = np.sum(d * d, axis=1)              # ||x-mu||^2 per pixel
+
+    rgb_spread_rms = float(np.sqrt(np.mean(sq)))
+    rgb_spread_mean = float(np.mean(np.sqrt(sq)))
+
+    return rgb_spread_rms, rgb_spread_mean
+
+
 def compute_contrast(frame_gray, l, t, r, b):
     patch = frame_gray[t:b, l:r]
     if patch.size == 0:
@@ -277,6 +303,8 @@ def process_one_video(video_path: str):
     prev_state = {}  # track_id -> dict(frame_idx,cx,cy,vx,vy, area_rel, mean_r... orientation)
     # short history for predictability
     traj_hist = defaultdict(lambda: deque(maxlen=CONFIG["predictability"]["history_len"]))  # track_id -> [(frame,cx,cy)]
+    rgb_hist = defaultdict(
+        lambda: deque(maxlen=CONFIG["predictability"]["history_len"]))  # track_id -> [(mean_r,mean_g,mean_b)]
 
     prev_gray = None
     prev_flow_mag = None  # for debug
@@ -294,6 +322,7 @@ def process_one_video(video_path: str):
         "x1","y1","x2","y2","box_w","box_h","area_px","area_rel",
         "cx","cy","cx_norm","cy_norm","dist_center_norm",
         "mean_r","mean_g","mean_b","center_r","center_g","center_b",
+        "rgb_spread_rms", "rgb_spread_mean",
         "mean_h","mean_s","mean_v",
         "mean_L","mean_a","mean_b_lab","mean_a_c","mean_b_c","std_L","std_a","std_b_lab",
         "contrast_gray_std","orientation_deg",
@@ -392,9 +421,24 @@ def process_one_video(video_path: str):
 
             # appearance
             color_stats = compute_color_stats(frame, l, t, r_, b_)
+            rgb_spread_rms, rgb_spread_mean = compute_rgb_3d_spread(frame, l, t, r_, b_)
             lab_stats = compute_lab_stats(frame, l, t, r_, b_)
             contrast = compute_contrast(gray, l, t, r_, b_)
             orient = compute_orientation_deg(gray, l, t, r_, b_)
+
+            # -------- temporal RGB variability (3D) over recent frames for this track --------
+            rgb_hist[tid].append((color_stats["mean_r"], color_stats["mean_g"], color_stats["mean_b"]))
+
+            rgb_hist_rms = np.nan
+            rgb_hist_mean = np.nan
+            if len(rgb_hist[tid]) >= 2:
+                X = np.array(rgb_hist[tid], dtype=np.float32)  # T x 3
+                mu = X.mean(axis=0)
+                d = X - mu
+                sq = np.sum(d * d, axis=1)  # ||x-mu||^2 per timepoint
+                rgb_hist_rms = float(np.sqrt(np.mean(sq)))  # sqrt(E[||x-mu||^2])
+                rgb_hist_mean = float(np.mean(np.sqrt(sq)))  # E[||x-mu||]
+
 
             # ---- saliency score from saliency map inside box ----
             sal_box_mean = float(np.nanmean(sal_map_norm[t:b_, l:r_])) if (b_ > t and r_ > l) else np.nan
@@ -426,6 +470,20 @@ def process_one_video(video_path: str):
                     vy = dy / dt
                     speed = float(np.sqrt(vx**2 + vy**2))
                     direction = float(np.degrees(np.arctan2(vy, vx)))
+                    # ---- temporal center RGB change (3D) ----
+                    d_center_rgb = np.nan
+                    pcr = prev.get("center_r", np.nan)
+                    pcg = prev.get("center_g", np.nan)
+                    pcb = prev.get("center_b", np.nan)
+
+                    if np.isfinite(pcr) and np.isfinite(center_r):
+                        d_center_rgb = float(
+                            np.sqrt(
+                                (center_r - pcr) ** 2 +
+                                (center_g - pcg) ** 2 +
+                                (center_b - pcb) ** 2
+                            ) / max(dt, 1e-8)
+                        )
 
                     if np.isfinite(prev.get("vx", np.nan)) and np.isfinite(prev.get("vy", np.nan)):
                         dvx = vx - prev["vx"]
@@ -467,6 +525,8 @@ def process_one_video(video_path: str):
                 "center_r": center_r,
                 "center_g": center_g,
                 "center_b": center_b,
+                "rgb_spread_rms": rgb_spread_rms,
+                "rgb_spread_mean": rgb_spread_mean,
                 "mean_h": color_stats["mean_h"],
                 "mean_s": color_stats["mean_s"],
                 "mean_v": color_stats["mean_v"],
@@ -564,8 +624,11 @@ def process_one_video(video_path: str):
                 "d_area_rel_per_s": d_area_rel,
                 "d_orientation_deg_per_s": d_orient,
                 "d_rgb_L2_per_s": d_rgb,
+                "d_center_rgb_L2_per_s": d_center_rgb,
                 "d_hsv_L2_per_s": d_hsv,
                 "d_lab_L2_per_s": d_lab,
+                "rgb_hist_rms": rgb_hist_rms,
+                "rgb_hist_mean": rgb_hist_mean,
 
                 "traj_pred_err_px": pred_err,
             })
@@ -603,6 +666,7 @@ def process_one_video(video_path: str):
                 vx=vx, vy=vy,
                 area_rel=area_rel,
                 mean_r=color_stats["mean_r"], mean_g=color_stats["mean_g"], mean_b=color_stats["mean_b"],
+                center_r=center_r, center_g=center_g, center_b=center_b,
                 mean_h=color_stats["mean_h"], mean_s=color_stats["mean_s"], mean_v=color_stats["mean_v"],
                 mean_L=lab_stats["mean_L"],
                 mean_a=lab_stats["mean_a"],
