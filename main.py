@@ -124,6 +124,18 @@ def compute_color_stats(frame_bgr, l, t, r, b):
     return dict(mean_r=float(mean_r), mean_g=float(mean_g), mean_b=float(mean_b),
                 mean_h=float(mean_h), mean_s=float(mean_s), mean_v=float(mean_v))
 
+def compute_center_rgb(frame_bgr, cx, cy):
+    """
+    Return RGB values at the (cx, cy) pixel location.
+    cx, cy can be float; will be rounded to nearest int and clamped to image bounds.
+    """
+    h, w = frame_bgr.shape[:2]
+    x = int(np.clip(int(round(cx)), 0, w - 1))
+    y = int(np.clip(int(round(cy)), 0, h - 1))
+
+    b, g, r = frame_bgr[y, x]  # OpenCV is BGR
+    return float(r), float(g), float(b)
+
 def compute_lab_stats(frame_bgr, l, t, r, b):
     """
     Compute Lab stats inside the bounding box.
@@ -281,7 +293,8 @@ def process_one_video(video_path: str):
         "video","frame","fps","track_id","cls_id","cls_name","det_confidence",
         "x1","y1","x2","y2","box_w","box_h","area_px","area_rel",
         "cx","cy","cx_norm","cy_norm","dist_center_norm",
-        "mean_r","mean_g","mean_b","mean_h","mean_s","mean_v",
+        "mean_r","mean_g","mean_b","center_r","center_g","center_b",
+        "mean_h","mean_s","mean_v",
         "mean_L","mean_a","mean_b_lab","mean_a_c","mean_b_c","std_L","std_a","std_b_lab",
         "contrast_gray_std","orientation_deg",
         "vx_px_s","vy_px_s","speed_px_s","dir_deg","accel_px_s2",
@@ -369,6 +382,7 @@ def process_one_video(video_path: str):
             cy = float(t + bh / 2.0)
             cx_norm = float(cx / max(1, width))
             cy_norm = float(cy / max(1, height))
+            center_r, center_g, center_b = compute_center_rgb(frame, cx, cy)
 
             # distance to center normalized (0..1)
             dx_c = cx - (width / 2.0)
@@ -450,6 +464,9 @@ def process_one_video(video_path: str):
                 "mean_r": color_stats["mean_r"],
                 "mean_g": color_stats["mean_g"],
                 "mean_b": color_stats["mean_b"],
+                "center_r": center_r,
+                "center_g": center_g,
+                "center_b": center_b,
                 "mean_h": color_stats["mean_h"],
                 "mean_s": color_stats["mean_s"],
                 "mean_v": color_stats["mean_v"],
@@ -692,8 +709,8 @@ def main():
     if not all_videos:
         raise RuntimeError(f"No .mp4 videos found under: {videos_root}")
 
-    # Pick 3 for testing
-    videos = all_videos[:min(3, len(all_videos))]
+    # Pick 1 for testing
+    videos = all_videos[:min(1, len(all_videos))]
 
     # Print info
     print(f"Found {len(all_videos)} total .mp4 videos under: {videos_root}")
@@ -713,7 +730,6 @@ def main():
                 fut.result()
 
     print("\nDone.")
-
 
 if __name__ == "__main__":
     main()
