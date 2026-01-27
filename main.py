@@ -75,7 +75,7 @@ CONFIG = {
         "fb_flags": 0,
     },
     "predictability": {
-        "history_len": 12,      # frames kept for predictability metrics
+        "history_len": 5,      # frames kept for predictability metrics
     }
 }
 
@@ -451,6 +451,7 @@ def process_one_video(video_path: str):
             vx = vy = speed = direction = accel = np.nan
             pred_err = np.nan
             occluded = False
+            d_center_rgb = np.nan
 
             # occlusion flag: if DeepSORT track has time_since_update>0, it was predicted (no new det)
             tsu = getattr(trk, "time_since_update", None)
@@ -471,7 +472,6 @@ def process_one_video(video_path: str):
                     speed = float(np.sqrt(vx**2 + vy**2))
                     direction = float(np.degrees(np.arctan2(vy, vx)))
                     # ---- temporal center RGB change (3D) ----
-                    d_center_rgb = np.nan
                     pcr = prev.get("center_r", np.nan)
                     pcg = prev.get("center_g", np.nan)
                     pcb = prev.get("center_b", np.nan)
