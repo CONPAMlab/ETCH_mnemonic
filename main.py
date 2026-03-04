@@ -3,7 +3,9 @@ import sys
 import cv2
 import numpy as np
 import pandas as pd
+import random
 from tqdm import tqdm
+from typing import Tuple
 import urllib.request
 from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -43,6 +45,8 @@ CONFIG = {
         "conf_threshold": 0.25,
         "iou_threshold": 0.45,
     },
+
+
     "input": {
         ## "videos_dir": "videos",
         "videos_dir": "/Volumes/HD_cv/ego4d_full_data/v2",  # <-- set to the Ego4D root (or the videos folder)
@@ -79,7 +83,9 @@ CONFIG = {
     }
 }
 
-
+CONFIG["scale"]["sample_n_videos"] = 10 # Pick 10 videos randomly to process
+CONFIG["scale"]["sample_seed"] = 123
+CONFIG["input"]["process_first_seconds"] = 60.0  # 1 minute
 VIDEOS_DIR = CONFIG["input"]["videos_dir"]
 OUTPUTS_DIR = CONFIG["input"]["output_dir"]
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
@@ -101,19 +107,29 @@ def get_color(track_id: int):
     return tuple(int(c) for c in np.random.randint(0, 255, size=3))
 
 
-def clamp_box(l, t, r, b, w, h):
-    l = int(max(0, min(l, w - 1)))
-    t = int(max(0, min(t, h - 1)))
-    r = int(max(0, min(r, w)))
-    b = int(max(0, min(b, h)))
-    if r <= l:
-        r = min(w, l + 1)
-    if b <= t:
-        b = min(h, t + 1)
-    return l, t, r, b
+def clamp_box(l: float, t: float, r: float, b: float, w: int, h: int) -> Tuple[int, int, int, int]:
+    # Clip in float space first (so comparisons are float-float)
+    l_f = float(np.clip(l, 0.0, float(w - 1)))
+    t_f = float(np.clip(t, 0.0, float(h - 1)))
+    r_f = float(np.clip(r, 0.0, float(w)))
+    b_f = float(np.clip(b, 0.0, float(h)))
+
+    # Convert to ints
+    l_i = int(l_f)
+    t_i = int(t_f)
+    r_i = int(r_f)
+    b_i = int(b_f)
+
+    # Ensure valid box
+    if r_i <= l_i:
+        r_i = min(w, l_i + 1)
+    if b_i <= t_i:
+        b_i = min(h, t_i + 1)
+
+    return l_i, t_i, r_i, b_i
 
 
-def compute_color_stats(frame_bgr, l, t, r, b):
+def compute_color_stats(frame_bgr: np.ndarray, l: int, t: int, r: int, b: int) -> dict:
     crop = frame_bgr[t:b, l:r]
     if crop.size == 0:
         return dict(mean_r=np.nan, mean_g=np.nan, mean_b=np.nan,
@@ -124,7 +140,7 @@ def compute_color_stats(frame_bgr, l, t, r, b):
     return dict(mean_r=float(mean_r), mean_g=float(mean_g), mean_b=float(mean_b),
                 mean_h=float(mean_h), mean_s=float(mean_s), mean_v=float(mean_v))
 
-def compute_center_rgb(frame_bgr, cx, cy):
+def compute_center_rgb(frame_bgr, cx, cy) -> Tuple[float, float, float]:
     """
     Return RGB values at the (cx, cy) pixel location.
     cx, cy can be float; will be rounded to nearest int and clamped to image bounds.
@@ -136,7 +152,7 @@ def compute_center_rgb(frame_bgr, cx, cy):
     b, g, r = frame_bgr[y, x]  # OpenCV is BGR
     return float(r), float(g), float(b)
 
-def compute_lab_stats(frame_bgr, l, t, r, b):
+def compute_lab_stats(frame_bgr, l, t, r, b) -> dict:
     """
     Compute Lab stats inside the bounding box.
 
@@ -179,7 +195,7 @@ def compute_lab_stats(frame_bgr, l, t, r, b):
     )
 
 
-def compute_rgb_3d_spread(frame_bgr, l, t, r, b):
+def compute_rgb_3d_spread(frame_bgr, l, t, r, b) -> Tuple[float, float]:
     """
     Spatial variability of RGB within the bounding box, treating each pixel as a 3D vector (R,G,B).
 
@@ -205,14 +221,14 @@ def compute_rgb_3d_spread(frame_bgr, l, t, r, b):
     return rgb_spread_rms, rgb_spread_mean
 
 
-def compute_contrast(frame_gray, l, t, r, b):
+def compute_contrast(frame_gray, l, t, r, b) -> float:
     patch = frame_gray[t:b, l:r]
     if patch.size == 0:
         return np.nan
     return float(np.std(patch))
 
 
-def compute_orientation_deg(frame_gray, l, t, r, b):
+def compute_orientation_deg(frame_gray, l, t, r, b) -> float:
     patch = frame_gray[t:b, l:r]
     if patch.size == 0:
         return np.nan
@@ -228,22 +244,35 @@ def compute_orientation_deg(frame_gray, l, t, r, b):
     return float(np.degrees(mean_angle))
 
 
-def compute_farneback_flow(prev_gray, gray):
+def compute_farneback_flow(prev_gray: np.ndarray, gray: np.ndarray):
     p = CONFIG["optflow"]
+
+    # Force exact types OpenCV expects (helps PyCharm inspections)
+    pyr_scale = float(p["fb_pyr_scale"])
+    levels = int(p["fb_levels"])
+    winsize = int(p["fb_winsize"])
+    iterations = int(p["fb_iterations"])
+    poly_n = int(p["fb_poly_n"])
+    poly_sigma = float(p["fb_poly_sigma"])
+    flags = int(p["fb_flags"])
+
+    # Make arrays contiguous (OpenCV likes this; also reduces weird type inference)
+    prev_gray = np.ascontiguousarray(prev_gray)
+    gray = np.ascontiguousarray(gray)
+
     flow = cv2.calcOpticalFlowFarneback(
         prev_gray, gray, None,
-        p["fb_pyr_scale"], p["fb_levels"], p["fb_winsize"], p["fb_iterations"],
-        p["fb_poly_n"], p["fb_poly_sigma"], p["fb_flags"]
+        pyr_scale, levels, winsize, iterations,
+        poly_n, poly_sigma, flags
     )
-    # flow[...,0]=vx, flow[...,1]=vy in px/frame
     mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=True)
     return flow, mag, ang
 
 
-def mean_in_box(arr2d, l, t, r, b):
+def mean_in_box(arr2d: np.ndarray, l: int, t: int, r: int, b: int) -> float:
     patch = arr2d[t:b, l:r]
     if patch.size == 0:
-        return np.nan
+        return float("nan")
     return float(np.mean(patch))
 
 
@@ -258,7 +287,7 @@ def append_rows(csv_path, rows, header_cols=None):
     df.to_csv(csv_path, mode="a", header=(not file_exists), index=False)
 
 
-def process_one_video(video_path: str):
+def process_one_video(video_path: str, max_seconds: float = 60.0):
     file = os.path.basename(video_path)
     done_flag = os.path.join(DONE_DIR, f"{os.path.splitext(file)[0]}.done")
 
@@ -271,9 +300,9 @@ def process_one_video(video_path: str):
     CLASS_NAMES = model.names
 
     tracker = DeepSort(
-        max_age=CONFIG["tracker"]["max_age"],
-        n_init=CONFIG["tracker"]["min_hits"],
-        max_iou_distance=CONFIG["tracker"]["max_iou_distance"],
+        max_age=int(CONFIG["tracker"]["max_age"]),
+        n_init=int(CONFIG["tracker"]["min_hits"]),
+        max_iou_distance=float(CONFIG["tracker"]["max_iou_distance"]),
         embedder="mobilenet",
         half=True,
         bgr=True,
@@ -285,6 +314,12 @@ def process_one_video(video_path: str):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    if fps > 0 and np.isfinite(fps):
+        max_frames = int(round(max_seconds * fps))
+        n_frames_to_process = min(total_frames, max_frames) if total_frames > 0 else max_frames
+    else:
+        n_frames_to_process = total_frames  # fallback
+
     # Saliency model (Itti-Koch)
     sal = pySaliencyMap(width, height)
 
@@ -294,7 +329,9 @@ def process_one_video(video_path: str):
         out_path = os.path.join(OUTPUTS_DIR, f"{os.path.splitext(file)[0]}_annotated.mp4")
         out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), max(1.0, fps), (width, height))
 
-    pbar = tqdm(total=total_frames, desc=file)
+    total_for_pbar = n_frames_to_process if (n_frames_to_process and n_frames_to_process > 0) else (
+        total_frames if total_frames > 0 else None)
+    pbar = tqdm(total=total_for_pbar, desc=f"{file} (first {max_seconds:.0f}s)")
 
     # trails
     track_traces = defaultdict(list)
@@ -302,9 +339,9 @@ def process_one_video(video_path: str):
     # previous state per track for deltas + kinematics
     prev_state = {}  # track_id -> dict(frame_idx,cx,cy,vx,vy, area_rel, mean_r... orientation)
     # short history for predictability
-    traj_hist = defaultdict(lambda: deque(maxlen=CONFIG["predictability"]["history_len"]))  # track_id -> [(frame,cx,cy)]
-    rgb_hist = defaultdict(
-        lambda: deque(maxlen=CONFIG["predictability"]["history_len"]))  # track_id -> [(mean_r,mean_g,mean_b)]
+    history_len: int = int(CONFIG["predictability"].get("history_len", 5))
+    traj_hist = defaultdict(lambda: deque(maxlen=history_len))  # track_id -> [(frame,cx,cy)]
+    rgb_hist = defaultdict(lambda: deque(maxlen=history_len))  # track_id -> [(mean_r,mean_g,mean_b)]
 
     prev_gray = None
     prev_flow_mag = None  # for debug
@@ -332,6 +369,9 @@ def process_one_video(video_path: str):
     ]
 
     while True:
+        if n_frames_to_process and n_frames_to_process > 0 and frame_idx >= n_frames_to_process:
+            break
+
         ret, frame = cap.read()
         if not ret:
             break
@@ -392,8 +432,8 @@ def process_one_video(video_path: str):
 
             tid = int(trk.track_id)
 
-            l, t, r_, b_ = trk.to_ltrb()
-            l, t, r_, b_ = clamp_box(l, t, r_, b_, width, height)
+            l_f, t_f, r_f, b_f = trk.to_ltrb()
+            l, t, r_, b_ = clamp_box(l_f, t_f, r_f, b_f, width, height)
 
             cls = trk.det_class
             if cls is None:
@@ -433,8 +473,8 @@ def process_one_video(video_path: str):
             rgb_hist_mean = np.nan
             if len(rgb_hist[tid]) >= 2:
                 X = np.array(rgb_hist[tid], dtype=np.float32)  # T x 3
-                mu = X.mean(axis=0)
-                d = X - mu
+                hist_mean = X.mean(axis=0)
+                d = X - hist_mean
                 sq = np.sum(d * d, axis=1)  # ||x-mu||^2 per timepoint
                 rgb_hist_rms = float(np.sqrt(np.mean(sq)))  # sqrt(E[||x-mu||^2])
                 rgb_hist_mean = float(np.mean(np.sqrt(sq)))  # E[||x-mu||]
@@ -773,12 +813,22 @@ def main():
     if not all_videos:
         raise RuntimeError(f"No .mp4 videos found under: {videos_root}")
 
-    # Pick 1 for testing
-    videos = all_videos[:min(1, len(all_videos))]
+    # ---- RANDOM SAMPLE ----
+    n = int(CONFIG["scale"].get("sample_n_videos", 10))
+    seed = CONFIG["scale"].get("sample_seed", None)
+    if seed is not None:
+        random.seed(int(seed))
+
+    if len(all_videos) <= n:
+        videos = all_videos[:]  # fewer than n available
+    else:
+        videos = random.sample(all_videos, n)
+
+    max_seconds = float(CONFIG["input"].get("process_first_seconds", 60.0))
 
     # Print info
     print(f"Found {len(all_videos)} total .mp4 videos under: {videos_root}")
-    print(f"Running {len(videos)} test videos:")
+    print(f"Randomly selected {len(videos)} videos (processing first {max_seconds:.0f} seconds each):")
     for v in videos:
         print("  -", v)
 
@@ -786,10 +836,10 @@ def main():
     nw = int(CONFIG["scale"]["num_workers"])
     if nw <= 1:
         for vp in videos:
-            process_one_video(vp)
+            process_one_video(vp, max_seconds=max_seconds)
     else:
         with ProcessPoolExecutor(max_workers=nw) as ex:
-            futs = [ex.submit(process_one_video, vp) for vp in videos]
+            futs = [ex.submit(process_one_video, vp, max_seconds) for vp in videos]
             for fut in as_completed(futs):
                 fut.result()
 
