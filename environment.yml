@@ -1,4 +1,4 @@
-name: NVSExtracter
+name: etch-nvs
 channels:
   - conda-forge
   - pytorch
@@ -7,18 +7,5 @@ dependencies:
   - python=3.10
   - pip
   - pip:
-      - numpy==1.26.4
-      - torch==2.2.0
-      - torchvision==0.17.0
-      - torchaudio==2.2.0
-      - ultralytics==8.3.0
-      - opencv-python==4.9.0.80
-      - deep-sort-realtime==1.3.0
-      - pandas==2.2.1
-      - matplotlib==3.8.2
-      - tqdm==4.66.4
-      - scikit-image==0.22.0
+      - -r requirements.txt
 
-## Create the environment
-# conda env create -f environment.yml
-#conda activate NVSExtracter

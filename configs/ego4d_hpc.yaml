@@ -1,0 +1,48 @@
+dataset:
+  root: /Volumes/HD_cv/ego4d_full_data/v2
+  video_dir: full_scale
+  manifest: full_scale/manifest.csv
+  read_only: true
+  video_extension: .mp4
+
+run:
+  output_root: /scratch/$USER/etch_runs
+  run_id: ego_nvs_hpc_yolo11l_botsort
+  resume: true
+  write_annotated_video: false
+  write_crops: false
+
+sample:
+  n_videos:
+  seed: 123
+  first_seconds:
+  frame_stride: 1
+  split:
+  scenario_contains:
+
+model:
+  detector: yolo
+  weights: yolo11l.pt
+  device: cuda
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  tracker: botsort.yaml
+  imgsz: 1280
+  half: true
+
+features:
+  color: true
+  saliency: true
+  flow: raft
+  embeddings:
+    - clip
+    - dinov2
+  segmentation: sam2
+  open_vocab_audit: grounding_dino
+  predictability_history: 5
+
+hpc:
+  num_workers: 1
+  shard_size: 1
+  flush_every_n_frames: 200
+
