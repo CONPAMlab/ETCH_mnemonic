@@ -1,7 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.env
+.venv/
+venv/
+env/
+
+# OS/editor noise
+.DS_Store
+.idea/
+
+# Data, model weights, and generated outputs
+videos/
+weights/
+models/
 outputs/
+runs/
 *.mp4
+*.MP4
+*.mov
 *.MOV
-*.mp4
-outputs/
-*.mp4
-outputs/
+*.avi
+*.mkv
+*.pt
+*.pth
+*.onnx
+*.parquet
+*.csv
+
+# Keep checked-in configuration/docs even though generated CSV/parquet are ignored.
+!configs/
+!configs/*.yaml
+
