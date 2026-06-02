@@ -4,11 +4,15 @@ This repository implements the computational backbone for Aim 4 of the ETCH mnem
 
 The working target is CVPR-level: robust Ego4D-scale extraction, explicit data provenance, run-level validation, and psychology-aligned feature targets for mnemonic precision and strength.
 
+The paper-facing research question is: **Can predictive coding over object-centric egocentric video explain not only what machines can anticipate, but what humans remember precisely, remember strongly, and systematically misremember?**
+
 ## Research Alignment
 
 Study D.4.1 characterizes natural vision statistics in first-person video. The pipeline extracts object identity, location, persistence, feature strength, temporal drift, saliency, motion, and predictability statistics from Ego4D.
 
 Study D.4.2 uses those statistics to prepare predictive-coding targets. Precision is operationalized as low temporal and prediction error. Strength is operationalized as distance from the environmental norm, including saturation, size, rarity, and embedding novelty. This creates a bridge between Efficient Temporal Coding and memory behavior.
+
+The abstract-style CVPR/ICCV proposal is in [docs/aim4_cvpr_abstract.md](docs/aim4_cvpr_abstract.md).
 
 ## Data Policy
 
@@ -39,6 +43,7 @@ etch extract --config configs/ego4d.yaml
 etch validate --run-dir runs/ego_nvs_smoke
 etch summarize --run-dir runs/ego_nvs_smoke
 etch model-predictive --features runs/ego_nvs_smoke
+etch train-predictive --config configs/predictive_model.yaml
 ```
 
 For full CUDA/HPC extraction, start from:
@@ -84,6 +89,31 @@ runs/<run_id>/
 ```
 
 Object tracks include geometry, track age, entry/exit placeholders, color statistics, Lab/HSV/RGB strength, saliency, optical-flow summaries, camera-relative motion, temporal drift, and predictability errors. Frame stats include object counts, track counts, mean motion, saliency, temporal autocorrelation, and feature predictability.
+
+## D.4.2 Predictive Coding Model
+
+`etch train-predictive` trains a self-supervised object-centric predictive coding model on D.4.1 object-track shards. Each tracked object becomes a temporal state sequence containing normalized position, size, color, saliency, motion, drift, and prediction-error features. The model predicts the next object state and per-feature uncertainty.
+
+The training output includes:
+
+```text
+runs/<run_id>/predictive_model/
+├── object_predictive_coding.pt
+├── training_config.json
+├── training_history.json
+├── predictive_training_report.json
+└── predictive_memory_alignment.parquet
+```
+
+The alignment table exposes model-derived memory variables:
+
+- `predicted_precision`: high when prediction error and uncertainty are low.
+- `predicted_strength`: high when prediction surprise and normalized object-state magnitude are high.
+- `prediction_surprise`: realized next-state error scaled by model uncertainty.
+- `mean_uncertainty`: uncertainty over future object state.
+- `latent_norm`: strength of the learned predictive representation.
+
+The intended behavioral benchmark is model-facing: each human trial should reference the same Ego4D clip/object tokens used by the predictive model, enabling trial-level tests of memory precision, strength, forgetting, and prior-driven bias.
 
 ## Validation
 

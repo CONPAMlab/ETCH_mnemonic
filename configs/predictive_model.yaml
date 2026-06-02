@@ -1,0 +1,27 @@
+features: runs/ego_nvs_smoke
+output: runs/ego_nvs_smoke/predictive_model
+
+training:
+  sequence_length: 8
+  prediction_horizon: 1
+  hidden_dim: 128
+  latent_dim: 64
+  batch_size: 64
+  epochs: 5
+  learning_rate: 0.001
+  min_track_length: 12
+  device: cpu
+  seed: 123
+
+model_claim:
+  name: Ego-NVS-Memory
+  question: "Can predictive coding over object-centric egocentric video explain what humans remember precisely, remember strongly, and systematically misremember?"
+  precision_mapping:
+    - inverse predictive uncertainty
+    - low next-state prediction error
+    - stable object identity and features
+  strength_mapping:
+    - prediction surprise
+    - object distinctiveness from learned priors
+    - salience and feature saturation
+
